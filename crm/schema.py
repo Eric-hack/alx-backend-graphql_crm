@@ -1,32 +1,37 @@
 import graphene
 from graphene_django import DjangoObjectType
+from graphene_django.filter import DjangoFilterConnectionField
 from django.db import transaction
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 import re
 from .models import Customer, Product, Order
+from .filters import CustomerFilter, ProductFilter, OrderFilter
 
 
-# Object Types
-class CRMQuery(graphene.ObjectType):
-    hello = graphene.String(default_value="Hello, GraphQL!")
-
+# Object Types with Connection support
 class CustomerType(DjangoObjectType):
     class Meta:
         model = Customer
         fields = '__all__'
+        filterset_class = CustomerFilter
+        interfaces = (graphene.relay.Node,)
 
 
 class ProductType(DjangoObjectType):
     class Meta:
         model = Product
         fields = '__all__'
+        filterset_class = ProductFilter
+        interfaces = (graphene.relay.Node,)
 
 
 class OrderType(DjangoObjectType):
     class Meta:
         model = Order
         fields = '__all__'
+        filterset_class = OrderFilter
+        interfaces = (graphene.relay.Node,)
 
 
 # Input Types
@@ -44,8 +49,38 @@ class ProductInput(graphene.InputObjectType):
 
 class OrderInput(graphene.InputObjectType):
     customer_id = graphene.ID(required=True)
-    product_ids = graphene.List(graphene.ID, required=True)
+    product_ids = graphene.List(graphene.NonNull(graphene.ID), required=True)
     order_date = graphene.DateTime()
+
+
+# Filter Input Types for custom filtering
+class CustomerFilterInput(graphene.InputObjectType):
+    name_icontains = graphene.String()
+    email_icontains = graphene.String()
+    created_at_gte = graphene.DateTime()
+    created_at_lte = graphene.DateTime()
+    phone_pattern = graphene.String()
+
+
+class ProductFilterInput(graphene.InputObjectType):
+    name_icontains = graphene.String()
+    price_gte = graphene.Decimal()
+    price_lte = graphene.Decimal()
+    stock_gte = graphene.Int()
+    stock_lte = graphene.Int()
+    low_stock = graphene.Boolean()
+
+
+class OrderFilterInput(graphene.InputObjectType):
+    total_amount_gte = graphene.Decimal()
+    total_amount_lte = graphene.Decimal()
+    order_date_gte = graphene.DateTime()
+    order_date_lte = graphene.DateTime()
+    customer_name = graphene.String()
+    customer_email = graphene.String()
+    product_name = graphene.String()
+    product_id = graphene.ID()
+    high_value = graphene.Boolean()
 
 
 # Helper Functions
@@ -63,6 +98,29 @@ def validate_email_unique(email, exclude_id=None):
     if exclude_id:
         query = query.exclude(id=exclude_id)
     return not query.exists()
+
+
+def apply_custom_filters(queryset, filter_input):
+    """Apply custom filters to queryset"""
+    if not filter_input:
+        return queryset
+    
+    filter_dict = {}
+    for key, value in filter_input.items():
+        if value is not None:
+            # Convert GraphQL filter names to Django filter syntax
+            if key.endswith('_icontains'):
+                field_name = key.replace('_icontains', '__icontains')
+            elif key.endswith('_gte'):
+                field_name = key.replace('_gte', '__gte')
+            elif key.endswith('_lte'):
+                field_name = key.replace('_lte', '__lte')
+            else:
+                field_name = key
+            
+            filter_dict[field_name] = value
+    
+    return queryset.filter(**filter_dict) if filter_dict else queryset
 
 
 # Mutations
@@ -252,7 +310,7 @@ class CreateOrder(graphene.Mutation):
             if not input.product_ids or len(input.product_ids) == 0:
                 return CreateOrder(
                     order=None,
-                    message="At least one product must be selected",
+                    message="At least one product must be provided",
                     success=False
                 )
 
@@ -304,26 +362,57 @@ class CreateOrder(graphene.Mutation):
             )
 
 
-# Queries
+# Queries with Filtering
 class Query(graphene.ObjectType):
-    all_customers = graphene.List(CustomerType)
+    # Relay-style connection fields with filtering
+    all_customers = DjangoFilterConnectionField(
+        CustomerType,
+        filterset_class=CustomerFilter,
+        order_by=graphene.String()
+    )
+    
+    all_products = DjangoFilterConnectionField(
+        ProductType,
+        filterset_class=ProductFilter,
+        order_by=graphene.String()
+    )
+    
+    all_orders = DjangoFilterConnectionField(
+        OrderType,
+        filterset_class=OrderFilter,
+        order_by=graphene.String()
+    )
+    
+    # Single object queries
     customer = graphene.Field(CustomerType, id=graphene.ID(required=True))
-    all_products = graphene.List(ProductType)
     product = graphene.Field(ProductType, id=graphene.ID(required=True))
-    all_orders = graphene.List(OrderType)
     order = graphene.Field(OrderType, id=graphene.ID(required=True))
+    
+    # List queries with custom filtering (non-relay)
+    customers_list = graphene.List(
+        CustomerType,
+        filter=CustomerFilterInput(),
+        order_by=graphene.String()
+    )
+    
+    products_list = graphene.List(
+        ProductType,
+        filter=ProductFilterInput(),
+        order_by=graphene.String()
+    )
+    
+    orders_list = graphene.List(
+        OrderType,
+        filter=OrderFilterInput(),
+        order_by=graphene.String()
+    )
 
-    def resolve_all_customers(self, info):
-        return Customer.objects.all()
-
+    # Resolvers for single objects
     def resolve_customer(self, info, id):
         try:
             return Customer.objects.get(id=id)
         except Customer.DoesNotExist:
             return None
-
-    def resolve_all_products(self, info):
-        return Product.objects.all()
 
     def resolve_product(self, info, id):
         try:
@@ -331,14 +420,82 @@ class Query(graphene.ObjectType):
         except Product.DoesNotExist:
             return None
 
-    def resolve_all_orders(self, info):
-        return Order.objects.all()
-
     def resolve_order(self, info, id):
         try:
             return Order.objects.get(id=id)
         except Order.DoesNotExist:
             return None
+
+    # Resolvers for list queries with custom filtering
+    def resolve_customers_list(self, info, filter=None, order_by=None):
+        queryset = Customer.objects.all()
+        
+        if filter:
+            if filter.get('name_icontains'):
+                queryset = queryset.filter(name__icontains=filter['name_icontains'])
+            if filter.get('email_icontains'):
+                queryset = queryset.filter(email__icontains=filter['email_icontains'])
+            if filter.get('created_at_gte'):
+                queryset = queryset.filter(created_at__gte=filter['created_at_gte'])
+            if filter.get('created_at_lte'):
+                queryset = queryset.filter(created_at__lte=filter['created_at_lte'])
+            if filter.get('phone_pattern'):
+                queryset = queryset.filter(phone__startswith=filter['phone_pattern'])
+        
+        if order_by:
+            queryset = queryset.order_by(order_by)
+        
+        return queryset
+
+    def resolve_products_list(self, info, filter=None, order_by=None):
+        queryset = Product.objects.all()
+        
+        if filter:
+            if filter.get('name_icontains'):
+                queryset = queryset.filter(name__icontains=filter['name_icontains'])
+            if filter.get('price_gte'):
+                queryset = queryset.filter(price__gte=filter['price_gte'])
+            if filter.get('price_lte'):
+                queryset = queryset.filter(price__lte=filter['price_lte'])
+            if filter.get('stock_gte'):
+                queryset = queryset.filter(stock__gte=filter['stock_gte'])
+            if filter.get('stock_lte'):
+                queryset = queryset.filter(stock__lte=filter['stock_lte'])
+            if filter.get('low_stock'):
+                queryset = queryset.filter(stock__lt=10)
+        
+        if order_by:
+            queryset = queryset.order_by(order_by)
+        
+        return queryset
+
+    def resolve_orders_list(self, info, filter=None, order_by=None):
+        queryset = Order.objects.select_related('customer').prefetch_related('products').all()
+        
+        if filter:
+            if filter.get('total_amount_gte'):
+                queryset = queryset.filter(total_amount__gte=filter['total_amount_gte'])
+            if filter.get('total_amount_lte'):
+                queryset = queryset.filter(total_amount__lte=filter['total_amount_lte'])
+            if filter.get('order_date_gte'):
+                queryset = queryset.filter(order_date__gte=filter['order_date_gte'])
+            if filter.get('order_date_lte'):
+                queryset = queryset.filter(order_date__lte=filter['order_date_lte'])
+            if filter.get('customer_name'):
+                queryset = queryset.filter(customer__name__icontains=filter['customer_name'])
+            if filter.get('customer_email'):
+                queryset = queryset.filter(customer__email__icontains=filter['customer_email'])
+            if filter.get('product_name'):
+                queryset = queryset.filter(products__name__icontains=filter['product_name']).distinct()
+            if filter.get('product_id'):
+                queryset = queryset.filter(products__id=filter['product_id']).distinct()
+            if filter.get('high_value'):
+                queryset = queryset.filter(total_amount__gte=1000)
+        
+        if order_by:
+            queryset = queryset.order_by(order_by)
+        
+        return queryset
 
 
 # Mutations

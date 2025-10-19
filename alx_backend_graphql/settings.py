@@ -38,10 +38,16 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'graphene_django',  
-    'crm',         
+    'crm',    
+    'django_filters',     
 ]
 GRAPHENE = {
-    "SCHEMA": "alx_backend_graphql.schema.schema"
+    'SCHEMA': 'graphql_crm.schema.schema',
+    'MIDDLEWARE': [
+        'graphene_django.debug.DjangoDebugMiddleware',
+    ],
+    'RELAY_CONNECTION_ENFORCE_FIRST_OR_LAST': True,
+    'RELAY_CONNECTION_MAX_LIMIT': 100,
 }
 
 MIDDLEWARE = [
