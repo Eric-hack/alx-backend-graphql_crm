@@ -1,27 +1,30 @@
+from gql import gql, Client
+from gql.transport.requests import RequestsHTTPTransport
 import datetime
-import requests
 
 def log_crm_heartbeat():
-    """Logs CRM heartbeat and checks GraphQL endpoint responsiveness."""
+    """Logs CRM heartbeat and optionally checks GraphQL responsiveness."""
     now = datetime.datetime.now().strftime("%d/%m/%Y-%H:%M:%S")
     log_message = f"{now} CRM is alive\n"
 
-    # Append to heartbeat log
+    # Append heartbeat to file
     with open("/tmp/crm_heartbeat_log.txt", "a") as f:
         f.write(log_message)
 
-    # Optional: Check if GraphQL endpoint responds
+    # Optional: Query GraphQL 'hello' field to verify endpoint
+    transport = RequestsHTTPTransport(
+        url="http://localhost:8000/graphql",
+        verify=True,
+        retries=3,
+    )
+
+    client = Client(transport=transport, fetch_schema_from_transport=False)
+
     try:
-        response = requests.post(
-            "http://localhost:8000/graphql",
-            json={"query": "{ hello }"},
-            timeout=5
-        )
+        query = gql("{ hello }")
+        response = client.execute(query)
         with open("/tmp/crm_heartbeat_log.txt", "a") as f:
-            if response.status_code == 200:
-                f.write(f"{now} GraphQL endpoint responsive\n")
-            else:
-                f.write(f"{now} GraphQL check failed (Status: {response.status_code})\n")
+            f.write(f"{now} GraphQL response: {response}\n")
     except Exception as e:
         with open("/tmp/crm_heartbeat_log.txt", "a") as f:
-            f.write(f"{now} Error checking GraphQL endpoint: {e}\n")
+            f.write(f"{now} GraphQL query failed: {e}\n")
