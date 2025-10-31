@@ -30,3 +30,5 @@ django-crontab
 gql
 requests
 graphene
+celery>=5.3.0
+django-celery-beat>=2.5.0
